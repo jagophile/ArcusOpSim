@@ -5,7 +5,7 @@ import pylab
 import scipy.interpolate as spint
 import astropy.coordinates as coord
 import astropy.units as u
-
+from targetClass import *
 
 # Some constants
 
@@ -27,8 +27,8 @@ def calc_distance(x, y, startx, starty):
   for i in range(len(r)):
     if not(numpy.isfinite(r[i])):
       r[i] = 1.0
-  print(max(r), min(r))
-  zzz=input('hmm1')
+#  print(max(r), min(r))
+#  zzz=input('hmm1')
   return r
 
 
@@ -59,7 +59,7 @@ class ObsPlan():
 
   def __init__(self):
     self.targetList = []
-    self.restrictions = []
+    self.restrictionList = []
 
   def set_timestep(self, timestep, tstart, tend):
     """
@@ -101,19 +101,48 @@ class ObsPlan():
     self.pointing = numpy.zeros(len(self.timeList), dtype = int)
 
     # arrays to store data
-    self.dataRates = numpy.zeros(len(self.timeList), dtype = numpy.float)
-    self.dataBuffer = numpy.zeros(len(self.timeList), dtype = numpy.float)
+    self.dataRates = numpy.zeros(len(self.timeList), dtype = float)
+    self.dataBuffer = numpy.zeros(len(self.timeList), dtype = float)
 
+    # XXX PLACEHOLDER: Add instruments
     self.SLEWRATE=10/60 # deg/min
 
 
-    # XXX PLACEHOLDER: Add instruments
+  def add_restriction(self, restrictionType, restrictionName, restrictionData):
+    """
+    Add a restriction to the ObsPlan's restrictionList
 
-  def add_restriction(self, RestrictionType, restrictionName, restrictionData, observationPlan = None):
+    PARAMETERS
+    ----------
+    RestrictionType : class
+      The class of restriction you are adding. Should be a subclass of Restriction
+    restrictionName : string
+      The name of the restriction
+    restrictionData : dict
+      Dictionary of infomation to be passed to restrictionType function
 
-    self.restrictions.append(RestrictionType(restrictionName, restrictionData, observationPlan = self))
+    RETURNS
+    -------
+    None
+    """
+
+    self.restrictionList.append(restrictionType(restrictionName, restrictionData, observationPlan = self))
 
   def add_target(self, Target):
+    """
+    Add a target to the ObsPlan's targetList
+
+    PARAMETERS
+    ----------
+
+    Target: Target
+      A Target class object
+
+    RETURNS
+    -------
+    None
+    """
+    
     Target.ObsPlan = self
     self.targetList.append(Target)
 
@@ -121,90 +150,36 @@ class ObsPlan():
   def calc_target_distances(self):
     t = []
     for target in self.targetList:
-      t.append(target.coord)
+      t.append(target.Coord)
     self.TargetCoords = coord.SkyCoord(t)
     for target in self.targetList:
-      target.distances = numpy.array(numpy.ceil(target.coord.separation(self.TargetCoords).values/self.slewrate), dtype=int)
+      target.distances = numpy.array(numpy.ceil(target.Coord.separation(self.TargetCoords).value/self.SLEWRATE), dtype=int)
 
 
-  def recalc_target_restrictions(self, startTimeIndex=0):
+  def recalc_target_restrictions(self, startTimeIndex=0, firstCalc=False):
     for target in self.targetList:
-      r = calc_visibility(self.restrictions, startTimeIndex=startTimeIndex)
-      r[:startTimeIndex]=False
-      target.visibility=r
-      target.totalVisibility = sum(target.visiblity)
+      target.calc_visibility(self.restrictionList, startTimeIndex=startTimeIndex, firstCalc=firstCalc)
 
 
-class Target():
-  """
-  Individual targets
-  """
+  def initialize_run(self):
 
-  def __init__(self, RA, Dec, reqObsTime, name="None", scienceGoal=-1, ObsPlan=False):
-    """
-    RA: float
-      Right Acension (J2000, decimal)
-    Dec: float
-      Declination (J2000, decimal)
-    reqObsTime : float
-      Total required observation time (s)
-    name : string
-      target name
-    scienceGoal : int or [int, int,...]
-      Science goal target(s) target applies to
-    ObsPlan : ObsPlan
-      The parent observation plan this target is within
-    """
-
-    self.RA = RA
-    self.Dec = Dec
-    self.Coord = coord.SkyCoord(RA*u.deg, Dec*u.deg)
-    self.reqObsTime = reqObsTime
-    self.name = name
-    try:
-      tmp = iter(scieneGoal)
-
-    except:
-      scienceGoal = [scienceGoal]
-    self.scienceGoal = scienceGoal
-    self.ObsPlan = ObsPlan
+    # calculate the distance between all targets
+    self.calc_target_distances()
+    
+    # calculate when each target is visible
+    self.recalc_target_restrictions(startTimeIndex=0, firstCalc=True) 
 
 
-  def set_time_intervals(timeList):
-    # all the times go here
-    self.timeList = timelist
-    self.visibility = numpy.zeros(len(timelist), dtype=bool)
+  def iterate_timestep(self, timeIndex=0):
+    # so what happens in here???
 
-  def calc_visibility(restrictions, startTimeIndex=0):
-    """
-    Calculate the times on which the target is visible
+    
 
-    restrictions : observatory_restrictions
-      The various restrictions which are enforced
+    for target in self.targetList:
+      # update the visibility of all targets
+      target.update_soft_visibility(self, timeIndex)
 
-    startTimeIndex : int
-      Only calculate visibility after this time, all before is
-      set to False (used to ignore visibility in the past)
-    """
-
-    isgood = numpy.ones(len(self.timeList), dtype=bool)
-
-
-    # apply general restrictions
-
-    for r in restrictions:
-      tmp = restrictions.applyRestrictions(self)
-      isgood[tmp==False] = False
-
-    # set the visibility to match the results
-    self.visibility= isgood
-
-    # set the visibility to False for all the earlier observations
-    self.visibility[:startTimeIndex] = False
-
-
-    # now calculate target specific restrictions
-    self.visibility[self.ObsPlan.observatoryActions != NOACTIONSET] = False
+      
 
 
 
@@ -355,6 +330,7 @@ class KeepOutRestriction(Restriction):
     self.Time = self.restrictionData['Time']
     self.keepOutAngle = self.restrictionData['Anglelimits']
 
+    self.needsRecalculated = True
 
 
   def applyRestriction(self, target):
@@ -364,34 +340,40 @@ class KeepOutRestriction(Restriction):
     target : Target
       The target we are applying restrictions to.
     """
+    
 
     tmp = calc_distance(self.RA, self.Dec, target.RA, target.Dec)
     tt = coord.FK5(target.RA*u.deg, target.Dec*u.deg)
     tmp2 = tt.separation(self.Coord)
 
-    fig = pylab.figure()
-    fig.show()
-    ax1 = fig.add_subplot(211)
-    ax2 = fig.add_subplot(212, sharex=ax1)
 
-    ax1.plot(self.observationPlan.timeList, tmp)
-    ax1.plot(self.observationPlan.timeList, tmp2)
+
+#    fig = pylab.figure()
+#    fig.show()
+#    ax1 = fig.add_subplot(211)
+#    ax2 = fig.add_subplot(212, sharex=ax1)
+
+#    ax1.plot(self.observationPlan.timeList, tmp)
+#    ax1.plot(self.observationPlan.timeList, tmp2)
 
 
     self.tmp = tmp
 
     vis = (tmp > self.keepOutAngle[0]) &\
                       (tmp < self.keepOutAngle[1])
+#
+#
+#    vis2 = (tmp2 > self.keepOutAngle[0]*u.deg) &\
+#                      (tmp2 < self.keepOutAngle[1]*u.deg)
+#
+#    ax2.plot(self.observationPlan.timeList, vis)
+#    ax2.plot(self.observationPlan.timeList, vis2)
 
+#    pylab.draw()
+#    zzz=input()
 
-    vis2 = (tmp2 > self.keepOutAngle[0]*u.deg) &\
-                      (tmp2 < self.keepOutAngle[1]*u.deg)
+    self.needsRecalculated = False
 
-    ax2.plot(self.observationPlan.timeList, vis)
-    ax2.plot(self.observationPlan.timeList, vis2)
-
-    pylab.draw()
-    zzz=input()
     return(vis)
 
 

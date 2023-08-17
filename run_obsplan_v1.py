@@ -1,5 +1,6 @@
 import obsplan
 import datetime
+import time
 import numpy
 import pylab
 def read_bright_objects(filename):
@@ -23,14 +24,18 @@ def read_bright_objects(filename):
 
   return(d)
 
-brightObjects = read_bright_objects('inputs/RA_Dec Bright Objects.txt')
-print(brightObjects[:5])
+
 
 ## INPUT SETTINGS
-TIMESTEP = 100.0
+TIMESTEP = 1000.0 # in s
 
 # declare the observation plan
 o = obsplan.ObsPlan()
+
+# read in the bright object locations
+brightObjects = read_bright_objects('inputs/RA_Dec Bright Objects.txt')
+print(brightObjects[:5])
+
 
 # declare the timing
 o.set_timestep(TIMESTEP, brightObjects['Time'][0], brightObjects['Time'][-1])
@@ -55,13 +60,15 @@ o.add_restriction(obsplan.KeepOutRestriction, 'EarthKeepOut', {'Time':brightObje
                                    'Anglelimits':[45.0,360.0]},)
 
 
+
+
 # MAKE FAKE TARGETLIST
 
 NTARG = 100
 TOTOBS=42e6
 MINOBS=5000
 MAXOBS=1e6
-
+NOACTIONSET = 0
 totobs = 0
 
 rng = numpy.random.default_rng(seed=1234)
@@ -74,36 +81,55 @@ rntimes[rntimes>MAXOBS] = MAXOBS
 for i in range(len(rntimes)):
   RA = numpy.random.random()*360
   Dec = (numpy.random.random()-0.5) * 180
-  time = rntimes[i]
+  targtime = rntimes[i]
   name = "Target_%03i"%(i)
-  t = obsplan.Target(RA, Dec, time, name=name)
+  t = obsplan.Target(RA, Dec, targtime, name=name)
 
   o.add_target(t)
 
 ###
 print("Added all the targets")
 
+t1 = time.time()
+## Next job, precalculate the distances
+o.calc_target_distances()
+t2 = time.time()
+## Next job, precalculate the effects of the restrictions
+o.recalc_target_restrictions(startTimeIndex=0, firstCalc=True)
+t3 = time.time()
 
-vis = o.restrictions[0].applyRestriction(target)
-vis2 = o.restrictions[1].applyRestriction(target)
+o.initialize_run()
+
+print("calc_target_distances: ", t2-t1, "s, recalc_target_restrictions: ", t3-t2)
+
 
 
 fig = pylab.figure()
 fig.show()
-ax1 = fig.add_subplot(411)
-ax2 = fig.add_subplot(412, sharex=ax1)
-ax3 = fig.add_subplot(413, sharex=ax1)
-ax4 = fig.add_subplot(414, sharex=ax1)
+ax1 = fig.add_subplot(111)
 
-ax1.plot(brightObjects['Time'], brightObjects['Sun_RA'])
-ax1.plot(brightObjects['Time'], brightObjects['Moon_RA'])
-ax2.plot(brightObjects['Time'], brightObjects['Sun_Dec'])
-ax2.plot(brightObjects['Time'], brightObjects['Moon_Dec'])
-ax3.plot(o.timeList, vis)
-ax3.plot(o.timeList, vis2)
-ax3.plot(o.timeList, vis&vis2)
-ax4.plot(o.timeList, o.restrictions[0].tmp)
-ax4.plot(o.timeList, o.restrictions[1].tmp)
+for t in o.targetList:
+  it = sum(t.visibility)/len(t.visibility)
+  print(it)
+
+for io in range(10,25):
+  ax1.plot(o.timeList, (io*2)+o.targetList[io].visibility, drawstyle='steps')
+  print(o.targetList[io].RA, o.targetList[io].Dec)
+
+
+#ax2 = fig.add_subplot(412, sharex=ax1)
+#ax3 = fig.add_subplot(413, sharex=ax1)
+#ax4 = fig.add_subplot(414, sharex=ax1)
+
+#ax1.plot(brightObjects['Time'], brightObjects['Sun_RA'])
+#ax1.plot(brightObjects['Time'], brightObjects['Moon_RA'])
+#ax2.plot(brightObjects['Time'], brightObjects['Sun_Dec'])
+#ax2.plot(brightObjects['Time'], brightObjects['Moon_Dec'])
+#ax3.plot(o.timeList, vis)
+#ax3.plot(o.timeList, vis2)
+#ax3.plot(o.timeList, vis&vis2)
+#ax4.plot(o.timeList, o.restrictions[0].tmp)
+#ax4.plot(o.timeList, o.restrictions[1].tmp)
 
 pylab.draw()
 zzz=input()
