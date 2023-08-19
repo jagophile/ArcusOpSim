@@ -64,8 +64,8 @@ o.add_restriction(obsplan.KeepOutRestriction, 'EarthKeepOut', {'Time':brightObje
 
 # MAKE FAKE TARGETLIST
 
-NTARG = 100
-TOTOBS=42e6
+NTARG = 50
+TOTOBS=10e6
 MINOBS=5000
 MAXOBS=1e6
 NOACTIONSET = 0
@@ -77,33 +77,27 @@ rntimes = rntimes *(TOTOBS/sum(rntimes))
 rntimes[rntimes<MINOBS] = MINOBS
 rntimes[rntimes>MAXOBS] = MAXOBS
 
+#targetList = o.TargetType(self, name="Generic", scienceGoal=1, ObsPlan=o)
+
+shortObsRestriction = obsplan.MinObsRestriction("ShortObs", {'minObsTime':5000}, observationPlan = o)
 
 for i in range(len(rntimes)):
   RA = numpy.random.random()*360
   Dec = (numpy.random.random()-0.5) * 180
   targtime = rntimes[i]
   name = "Target_%03i"%(i)
-  t = obsplan.Target(RA, Dec, targtime, name=name)
-
+  idnumber = i+1
+  t = obsplan.Target(RA, Dec, targtime, name=name, idnumber = idnumber)
+  t.add_restriction(shortObsRestriction)
   o.add_target(t)
 
 ###
 print("Added all the targets")
 
-t1 = time.time()
-## Next job, precalculate the distances
-o.calc_target_distances()
-t2 = time.time()
-## Next job, precalculate the effects of the restrictions
-o.recalc_target_restrictions(startTimeIndex=0, firstCalc=True)
-t3 = time.time()
-
 o.initialize_run()
 
-print("calc_target_distances: ", t2-t1, "s, recalc_target_restrictions: ", t3-t2)
-
-
-
+# NOW DOOOO IT
+o.iterate_timestep()
 fig = pylab.figure()
 fig.show()
 ax1 = fig.add_subplot(111)
@@ -112,10 +106,13 @@ for t in o.targetList:
   it = sum(t.visibility)/len(t.visibility)
   print(it)
 
-for io in range(10,25):
+for io in range(1,10):
   ax1.plot(o.timeList, (io*2)+o.targetList[io].visibility, drawstyle='steps')
+  ax1.plot(o.timeList, (io*2)+o.targetList[io].startVisibility, '--', linewidth=3,drawstyle='steps')
   print(o.targetList[io].RA, o.targetList[io].Dec)
 
+
+print(o.observatoryActions)
 
 #ax2 = fig.add_subplot(412, sharex=ax1)
 #ax3 = fig.add_subplot(413, sharex=ax1)

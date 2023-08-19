@@ -10,6 +10,16 @@ from targetClass import *
 # Some constants
 
 NOACTIONSET = 0
+MODEWAIT = -1
+MODESLEW = -2
+MODESETTLE = -3
+
+  
+
+  
+  
+    
+    
 
 def calc_distance(x, y, startx, starty):
   # calculate the distance in degrees between from startx, starty to
@@ -59,7 +69,10 @@ class ObsPlan():
 
   def __init__(self):
     self.targetList = []
+    self.targetClasses = []
     self.restrictionList = []
+    self.STARTTIMECUTOFF = 5*3600 # 5 hours
+    self.modes = []
 
   def set_timestep(self, timestep, tstart, tend):
     """
@@ -72,10 +85,10 @@ class ObsPlan():
     tend : datetime
       Time to end plan
     """
-    ts = int(timestep * 1000)
-    self.timestep = numpy.timedelta64(ts, 'ms')
     ts = int(timestep * 1)
     self.timestep = numpy.timedelta64(ts, 's')
+
+    self.STARTTIMECUTOFFSTEPS = int(numpy.ceil(numpy.timedelta64(self.STARTTIMECUTOFF, 's')/ self.timestep))
     # check inputs
     print(type(tstart))
     if type(tstart) is numpy.datetime64:
@@ -98,14 +111,17 @@ class ObsPlan():
 
     # set up data arrays to store the satellite's actions
     self.observatoryActions = numpy.zeros(len(self.timeList), dtype = int)
-    self.pointing = numpy.zeros(len(self.timeList), dtype = int)
+    self.RA = numpy.zeros(len(self.timeList), dtype = float)
+    self.Dec = numpy.zeros(len(self.timeList), dtype = float)
 
     # arrays to store data
     self.dataRates = numpy.zeros(len(self.timeList), dtype = float)
     self.dataBuffer = numpy.zeros(len(self.timeList), dtype = float)
 
     # XXX PLACEHOLDER: Add instruments
-    self.SLEWRATE=10/60 # deg/min
+    self.SLEWRATE=5/60 # deg/min
+    self.SETTLETIME=3600 # s
+    self.SETTLETIMESTEPS = int(numpy.ceil(numpy.timedelta64(self.SETTLETIME, 's')/ self.timestep))
 
 
   def add_restriction(self, restrictionType, restrictionName, restrictionData):
@@ -127,6 +143,27 @@ class ObsPlan():
     """
 
     self.restrictionList.append(restrictionType(restrictionName, restrictionData, observationPlan = self))
+
+  def add_compulsory_action(self, actionType, restrictionName, restrictionData):
+    """
+    Add a restriction to the ObsPlan's restrictionList
+
+    PARAMETERS
+    ----------
+    RestrictionType : class
+      The class of restriction you are adding. Should be a subclass of Restriction
+    restrictionName : string
+      The name of the restriction
+    restrictionData : dict
+      Dictionary of infomation to be passed to restrictionType function
+
+    RETURNS
+    -------
+    None
+    """
+
+    self.restrictionList.append(restrictionType(restrictionName, restrictionData, observationPlan = self))
+
 
   def add_target(self, Target):
     """
@@ -156,28 +193,227 @@ class ObsPlan():
       target.distances = numpy.array(numpy.ceil(target.Coord.separation(self.TargetCoords).value/self.SLEWRATE), dtype=int)
 
 
-  def recalc_target_restrictions(self, startTimeIndex=0, firstCalc=False):
+  def calc_target_restrictions(self, startTimeIndex=0, firstCalc=False):
     for target in self.targetList:
       target.calc_visibility(self.restrictionList, startTimeIndex=startTimeIndex, firstCalc=firstCalc)
-
+      target.calc_start_visibility(startTimeIndex)
 
   def initialize_run(self):
+
+    for target in self.targetList:
+      target.set_time_intervals(self.timeList)
 
     # calculate the distance between all targets
     self.calc_target_distances()
     
     # calculate when each target is visible
-    self.recalc_target_restrictions(startTimeIndex=0, firstCalc=True) 
+    self.calc_target_restrictions(startTimeIndex=0, firstCalc=True) 
+
+    # add compulsory actions
+    # PLACEHOLDER FOR e.g. SDDL, ECLIPSE
+#    self.calc_required_actions(startTimeIndex=0, firstCalc=True) 
 
 
   def iterate_timestep(self, timeIndex=0):
     # so what happens in here???
 
+    total_starttime=numpy.zeros(len(self.targetList), dtype=int)
+    total_available_obstime=numpy.zeros(len(self.targetList), dtype=int)
+    total_remaining_obstime_required=numpy.zeros(len(self.targetList), dtype=int)
+    next_starttime=numpy.zeros(len(self.targetList), dtype=int)
+    next_obslength=numpy.zeros(len(self.targetList), dtype=int)
+    
     
 
-    for target in self.targetList:
+    for itarget, target in enumerate(self.targetList):
       # update the visibility of all targets
-      target.update_soft_visibility(self, timeIndex)
+
+      # ignore completed targets
+      if target.targetComplete:
+        continue
+
+      # slew onto target
+      target.update_start_visibility(self, timeIndex) # this will take ages!
+      total_starttime[itarget] = sum(target.startVisibility)
+      total_available_obstime[itarget] = sum(target.visibility)
+      total_remaining_obstime[itarget] = target.reqObsTime-target.completeObsTime
+      ist = numpy.where(target.startVisibility[itarget:]==True)[0][0]+timeIndex
+      next_starttime[itarget] = ist
+      
+      #
+      for i in range(ist, len(self.timeList)):
+        if target.startVisibility[i]==False:
+          break
+      next_obslength[itarget] = i-ist
+
+    ## IN HERE CALL RANKING ALGORITHM
+
+    rank = self.rank_targets(total_starttime, total_available_obstime,
+                        total_remaining_obstime, next_starttime, next_obslength, len(self.timeList)-timeIndex)
+                        
+    if len(rank)==0:
+      self.observatoryActions[timeIndex:timeIndex+self.STARTTIMECUTOFFSTEPS]=MODEWAIT
+      timeOut = timeIndex+self.STARTTIMECUTOFFSTEPS
+    else:
+      # pick something that sucks eggs.
+      if len(rank)==1:
+        chosenTarget = rank[0]['index']
+      else:
+        rng = numpy.random.default_rng()
+        s=sum(rank['score'])
+        while True:
+          exp = rng.exponential(s)
+          if exp < 2*s:
+            break
+        s =0
+        i_s = 0
+        while exp > 2*s:
+          s+=2*rank['score'][i_s]*2
+          i_s+=1
+        chosenTarget = rank[i_s-1]['index']
+
+      # implement the observation
+      self.make_observation(chosenTarget, timeIndex)
+        
+        
+  def make_observation(self, chosenTarget, timeIndex):
+    # find the matching target
+
+    target = self.targetList(chosenTarget)
+
+    # slew to target
+    # find the last assigned pointing
+
+    if timeIndex > 0:
+      pointing = self.pointing[timeIndex-1]
+      if pointing == 0:
+        tmptimeIndex = timeIndex-1
+        while tmptimeIndex > 0:
+          tmptimeIndex-1
+          pointing = self.pointing[tmptimeIndex]
+          if pointing != 0: break
+
+        # fill in the pointing up until now
+        pointing[tmptimeIndex+1:timeindex-1] = pointing[tmptimeIndex]
+
+      # calculate slew time
+      slewtime = int(numpy.ceil(pointing[timeIndex-1].separation(target.Coord)))
+
+      # Put in the slew
+      self.observatoryActions[timeIndex:timeIndex+slewtime] = MODESLEW
+      timeIndex += slewtime
+      
+      # Put in the settle
+    self.observatoryActions[timeIndex:timeIndex+self.SETTLETIMESTEPS] = MODESETTLE
+    timeIndex += self.SETTLETIMESTEPS
+      
+      # Make the observation
+
+    while( (target.completeObsTime < target.reqObsTime) & #target not complete
+           (target.visibility[timeIndex]==True) & # target is visible
+           (self.observatoryActions[timeIndex] == 0) & # observatory not doing something else
+           (timeIndex < len(self.observatoryActions))): # haven't overrun end of mission
+      self.observatoryActions[timeIndex] = target.idNumber
+      self.pointing[timeIndex] = target.Coord
+      timeIndex+=1
+
+    # update the visibility chart for every target
+    if target.completeObsTime >= target.reqObsTime : target.targetComplete=True
+    
+    for target in self.targetList:
+      target.calc_start_visibility(timeIndex)
+      
+#    for target in self.targetList:
+#      t.append(target.Coord)
+#    self.TargetCoords = coord.SkyCoord(t)
+#    for target in self.targetList:
+#      target.distances = numpy.array(numpy.ceil(target.Coord.separation(self.TargetCoords).value/self.SLEWRATE), dtype=int)
+
+          
+        
+  def rank_targets(self, total_starttime, total_available_obstime,
+                   total_remaining_obstime, next_starttime, next_obslength, remaining_time):
+  
+    """
+    This is the ranking algorithm. Whee. All parameters are ntarget arrays
+  
+    PARAMETERS
+    ----------
+  
+    total_starttime : int
+      number of timesteps at which observations could start
+    total_available_obstime : int
+      number of timesteps at which target is observable
+    total_remaining_obstime : float
+      amount of time remaining to observe (s)
+    next_starttime : int
+      when the target is next observable
+    next_obslength : int
+      number of timesteps next observation could take place for
+    remaining_time : int
+      total number of timesteps left
+  
+    RETURNS
+    -------
+    array(int, float) Ranked list of potential targets and theis scores
+    """
+  
+    ### check for emergency targets
+    iurgent = numpy.where(total_remaining_obstime/total_available_obstime < 2.0)[0]
+  
+    score = total_remaining_obstime/total_starttime
+    score[total_remaining_obstime==0]= 0.0
+  
+    ###
+    scoredtype = numpy.dtype({'names':['index','score'],
+                              'formats':[int, float]})
+  
+    if len(iurgent) > 0:
+      score[~iurgent]=0
+  
+      rank = numpy.zeros(len(iurgent), dtype=scoredtype)
+  
+      for iu in iurgent:
+        rank[iu]['index'] = iu
+        rank[iu]['score'] = score[iu]
+  
+      rank.sort(score)
+      rank=rank[::-1]
+      return(rank)
+  
+    # check for constrained observations
+    iconst = numpy.where(total_starttime < 0.05*remaining_time)[0]
+  
+    if len(iconst) > 0:
+      score[~iconst] = 0
+      rank = numpy.zeros(len(iconst), dtype=scoredtype)
+      for ic in iconst:
+        rank[ic]['index'] = ic
+        rank[ic]['score'] = score[ic]
+      rank.sort(score)
+      rank=rank[::-1]
+      return(rank)
+  
+    # score the remaining observations
+  
+  
+    ir = numpy.where((score > 0) & (next_starttime < self.STARTTIMECUTOFFSTEPS))[0]
+  
+    if len(ir) == 0:
+      rank = numpy.zeros(0, dtype=scoredtype)
+      return(rank)
+  
+    score[~ir] = 0
+    rank = numpy.zeros(len(ir), dtype=scoredtype)
+    for iir in ir:
+      rank[iir]['index'] = iir
+      rank[iir]['score'] = score[iir]
+    rank.sort(score)
+    rank=rank[::-1]
+    return(rank)
+    
+    
+      
 
       
 
@@ -214,7 +450,7 @@ class Restriction():
     self.setupRoutine(self)
 
 
-  def applyRestriction(target):
+  def apply_restriction(target):
     """
     Apply restrictions to the target
 
@@ -255,7 +491,7 @@ class ObservatoryMode():
     self.setupRoutine(self)
 
 
-  def applyMode(target):
+  def apply_mode(target, tstart, tend):
     """
     Apply restrictions to the target
 
@@ -266,6 +502,45 @@ class ObservatoryMode():
 
     return(visibility)
 
+
+
+class ObservatoryModeWait(ObservatoryMode):
+
+  def __init__(self, obsModeName, modeData, observationPlan = None):
+    """
+    An observatory/instrument mode
+
+    restrictionName : string
+      The name of the restriction
+    restrictionData : dict
+      A dictionary containing any of the restriction information required
+    setupRoutine: func
+      A function for handling any initial setup
+    implementationRoutine: func
+      A function for calculating the restriction. Should return True or False for all
+      time periods.
+    observationPlan : ObsPlan
+      The parent observation plan object
+    """
+
+    self.obsModeName = obsModeName
+    self.modeData = modeData
+    self.observationPlan=observationPlan
+    # call the setup routine
+    self.setupRoutine(self)
+    self.modeIdentifier = MODEWAIT
+
+
+  def apply_mode(istart, ilen):
+    """
+    Apply restrictions to the target
+
+    target : Target
+      The target we are applying restrictions to.
+    """
+    self.observationPlan.observatoryActions[istart:istart+ilen] = self.modeIdentifier
+
+    
 class KeepOutRestriction(Restriction):
 
   def __init__(self, restrictionName, restrictionData, observationPlan = None):
@@ -376,6 +651,131 @@ class KeepOutRestriction(Restriction):
 
     return(vis)
 
+class SlewRestriction(Restriction):
+
+  def __init__(self, restrictionName, restrictionData, observationPlan = None):
+    """
+    An observatory/instrument restriction
+
+    restrictionName : string
+      The name of the restriction
+    restrictionData : dict
+      A dictionary containing any of the restriction information required
+    setupRoutine: func
+      A function for handling any initial setup
+    implementationRoutine: func
+      A function for calculating the restriction. Should return True or False for all
+      time periods.
+    observationPlan : ObsPlan
+      The parent observation plan object
+    """
+
+    self.restrictionName = restrictionName
+    self.restrictionData = restrictionData
+
+    self.observationPlan=observationPlan
+
+    self.slewRate = restrictionData['slewRate']
+    self.settle = restrictionData['settleTime']
+    self.needsRecalculated = True
+
+
+  def applyRestriction(self, target):
+    """
+    Apply restrictions to the target
+
+    target : Target
+      The target we are applying restrictions to.
+    """
+    timestep = self.ObsPlan.nextTimeList
+#    if timestep > 0:
+      # look backwards
+      
+      
+    tt = coord.FK5(target.RA*u.deg, target.Dec*u.deg)
+#    tmp2 = target.Coord.separation(self.observationPlan.)
+
+#
+#    tmp = calc_distance(self.RA, self.Dec, target.RA, target.Dec)
+#    tt = coord.FK5(target.RA*u.deg, target.Dec*u.deg)
+#    tmp2 = tt.separation(self.Coord)
+    
+
+
+
+#    fig = pylab.figure()
+#    fig.show()
+#    ax1 = fig.add_subplot(211)
+#    ax2 = fig.add_subplot(212, sharex=ax1)
+
+#    ax1.plot(self.observationPlan.timeList, tmp)
+#    ax1.plot(self.observationPlan.timeList, tmp2)
+
+
+    self.tmp = tmp
+
+    vis = (tmp > self.keepOutAngle[0]) &\
+                      (tmp < self.keepOutAngle[1])
+#
+#
+#    vis2 = (tmp2 > self.keepOutAngle[0]*u.deg) &\
+#                      (tmp2 < self.keepOutAngle[1]*u.deg)
+#
+#    ax2.plot(self.observationPlan.timeList, vis)
+#    ax2.plot(self.observationPlan.timeList, vis2)
+
+#    pylab.draw()
+#    zzz=input()
+
+    self.needsRecalculated = False
+
+    return(vis)
+
+class MinObsRestriction(Restriction):
+
+  def __init__(self, restrictionName, restrictionData, observationPlan = None):
+    """
+    Minimum required observing time
+
+    restrictionName : string
+      The name of the restriction
+    restrictionData : dict
+      A dictionary containing any of the restriction information required
+    setupRoutine: func
+      A function for handling any initial setup
+    implementationRoutine: func
+      A function for calculating the restriction. Should return True or False for all
+      time periods.
+    observationPlan : ObsPlan
+      The parent observation plan object
+    """
+
+    self.restrictionName = restrictionName
+    self.restrictionData = restrictionData
+
+    self.observationPlan=observationPlan
+
+    self.minObsTime = restrictionData['minObsTime']
+    self.minObsTimeSteps = int(numpy.ceil(numpy.timedelta64(self.minObsTime,'s')/self.observationPlan.timestep))
+    
+  def applyRestriction(self, target):
+    """
+    Apply restrictions to the target
+
+    target : Target
+      The target we are applying restrictions to.
+    """
+
+    isgood = numpy.ones(len(target.visibility), dtype=bool)
+    
+    isgood[target.visibility!=True] = False
+
+    indexes = numpy.where(((isgood[1:]+1) - (isgood[:-1]+1)) < 0)[0]
+    
+    for ii in indexes:
+      isgood[ max([0, ii+1-self.minObsTimeSteps]) : ii+1]=False
+
+    return(isgood)
 
 
 
